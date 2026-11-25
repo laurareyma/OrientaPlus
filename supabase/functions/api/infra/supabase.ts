@@ -13,6 +13,8 @@ import type {
   Repository,
   SavedOpportunityRecord,
   StoredProfile,
+  TotpAttemptLimit,
+  TotpAttemptResult,
 } from "../deps.ts";
 import { findMissingFields, PROFILE_FIELDS } from "../profile-completeness.ts";
 
@@ -292,7 +294,12 @@ export class SupabaseRepository implements Repository {
   ): Promise<boolean> {
     const { data, error } = await this.db
       .from("mfa_factors")
-      .update({ confirmed_at: confirmedAt, last_used_step: step })
+      .update({
+        confirmed_at: confirmedAt,
+        last_used_step: step,
+        totp_attempts: 0,
+        totp_attempts_window_start: null,
+      })
       .eq("user_id", userId)
       .is("confirmed_at", null)
       .select("user_id");
@@ -307,6 +314,26 @@ export class SupabaseRepository implements Repository {
     });
     if (error) throw new Error(`consume_totp_step: ${error.message}`);
     return data === true;
+  }
+
+  async registerTotpAttempt(
+    userId: string,
+    now: Date,
+    limit: TotpAttemptLimit,
+  ): Promise<TotpAttemptResult> {
+    const { data, error } = await this.db.rpc("register_totp_attempt", {
+      p_user_id: userId,
+      p_now: now.toISOString(),
+      p_max_attempts: limit.maxAttempts,
+      p_window_seconds: limit.windowSeconds,
+    });
+    if (error) throw new Error(`register_totp_attempt: ${error.message}`);
+    const row = (data as Array<{ allowed: boolean; retry_at: string }>)?.[0];
+    if (!row) throw new Error("register_totp_attempt: no existe el factor");
+    return {
+      allowed: row.allowed,
+      retryAt: new Date(row.retry_at).toISOString(),
+    };
   }
 
   async createStepUpChallenge(challenge: {

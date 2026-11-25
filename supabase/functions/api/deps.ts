@@ -40,6 +40,18 @@ export interface MfaFactor {
   lastUsedStep: number | null;
 }
 
+/** Límite de intentos de código TOTP por persona (ventana fija). */
+export interface TotpAttemptLimit {
+  maxAttempts: number;
+  windowSeconds: number;
+}
+
+/** Resultado de registrar un intento; retryAt es el fin de la ventana actual. */
+export interface TotpAttemptResult {
+  allowed: boolean;
+  retryAt: string;
+}
+
 export interface OpportunityView {
   opportunityId: string;
   title: string;
@@ -121,13 +133,30 @@ export interface Repository {
     userId: string,
     encrypted: { ciphertext: Uint8Array; iv: Uint8Array },
   ): Promise<void>;
-  /** Confirma un factor pendiente; false si no había uno pendiente. */
+  /**
+   * Confirma un factor pendiente y reinicia el contador de intentos; false si
+   * no había uno pendiente.
+   */
   confirmMfaFactor(
     userId: string,
     step: number,
     confirmedAt: string,
   ): Promise<boolean>;
-  /** Registra la ventana usada de forma atómica; false si es repetición. */
+  /**
+   * Cuenta un intento de código antes de verificarlo, de forma atómica, para
+   * que peticiones en paralelo no se salten el límite. allowed es false si ya
+   * se superó maxAttempts dentro de la ventana. Un código correcto reinicia
+   * el contador (consumeTotpStep y confirmMfaFactor).
+   */
+  registerTotpAttempt(
+    userId: string,
+    now: Date,
+    limit: TotpAttemptLimit,
+  ): Promise<TotpAttemptResult>;
+  /**
+   * Registra la ventana usada de forma atómica y reinicia el contador de
+   * intentos; false si es repetición.
+   */
   consumeTotpStep(userId: string, step: number): Promise<boolean>;
   createStepUpChallenge(challenge: {
     userId: string;

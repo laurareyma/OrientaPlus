@@ -84,3 +84,36 @@ Deno.test("las rutas de MFA exigen sesión", async () => {
 
   assertEquals(res.status, 401);
 });
+
+Deno.test("la confirmación de la inscripción también limita los intentos a 5", async () => {
+  const clock = new TestClock();
+  const { app } = createTestApp({ now: clock.now });
+  const { secret } = await (await post(app, "/api/mfa/enroll")).json();
+
+  for (let i = 0; i < 5; i++) {
+    const wrong = await post(app, "/api/mfa/enroll/confirm", {
+      code: "000000",
+    });
+    assertEquals(wrong.status, 422);
+  }
+  const code = await generateTotp(decodeBase32(secret), clock.unixSeconds());
+  const blocked = await post(app, "/api/mfa/enroll/confirm", { code });
+
+  assertEquals(blocked.status, 429);
+  assertEquals((await blocked.json()).error, "too_many_attempts");
+});
+
+Deno.test("volver a pedir la inscripción no reinicia el límite de intentos", async () => {
+  const clock = new TestClock();
+  const { app } = createTestApp({ now: clock.now });
+  await post(app, "/api/mfa/enroll");
+  for (let i = 0; i < 5; i++) {
+    await post(app, "/api/mfa/enroll/confirm", { code: "000000" });
+  }
+
+  const { secret } = await (await post(app, "/api/mfa/enroll")).json();
+  const code = await generateTotp(decodeBase32(secret), clock.unixSeconds());
+  const res = await post(app, "/api/mfa/enroll/confirm", { code });
+
+  assertEquals(res.status, 429);
+});

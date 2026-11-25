@@ -12,6 +12,8 @@ import type {
   Repository,
   SavedOpportunityRecord,
   StoredProfile,
+  TotpAttemptLimit,
+  TotpAttemptResult,
 } from "../deps.ts";
 import { makeOpportunity, NOW } from "../../_shared/domain/testing/fixtures.ts";
 
@@ -68,6 +70,8 @@ export class InMemoryRepository implements Repository {
   mfaFactors = new Map<string, MfaFactor>();
   challenges: StoredChallenge[] = [];
   deletedUsers: string[] = [];
+  /** Contador de intentos de código; en Postgres son columnas de mfa_factors. */
+  totpAttempts = new Map<string, { count: number; windowStart: Date }>();
 
   /** El reloj es el mismo de la app para simular vencimientos. */
   constructor(private readonly now: () => Date = () => NOW) {}
@@ -175,6 +179,7 @@ export class InMemoryRepository implements Repository {
     if (!factor || factor.confirmedAt !== null) return Promise.resolve(false);
     factor.confirmedAt = confirmedAt;
     factor.lastUsedStep = step;
+    this.totpAttempts.delete(userId);
     return Promise.resolve(true);
   }
 
@@ -188,7 +193,28 @@ export class InMemoryRepository implements Repository {
       return Promise.resolve(false);
     }
     factor.lastUsedStep = step;
+    this.totpAttempts.delete(userId);
     return Promise.resolve(true);
+  }
+
+  // Misma regla que la función SQL register_totp_attempt.
+  registerTotpAttempt(
+    userId: string,
+    now: Date,
+    limit: TotpAttemptLimit,
+  ): Promise<TotpAttemptResult> {
+    const windowMs = limit.windowSeconds * 1000;
+    const current = this.totpAttempts.get(userId);
+    const windowOpen = current !== undefined &&
+      current.windowStart.getTime() > now.getTime() - windowMs;
+    const next = windowOpen
+      ? { count: current.count + 1, windowStart: current.windowStart }
+      : { count: 1, windowStart: now };
+    this.totpAttempts.set(userId, next);
+    return Promise.resolve({
+      allowed: next.count <= limit.maxAttempts,
+      retryAt: new Date(next.windowStart.getTime() + windowMs).toISOString(),
+    });
   }
 
   createStepUpChallenge(challenge: Omit<StoredChallenge, "consumedAt">) {
@@ -219,6 +245,7 @@ export class InMemoryRepository implements Repository {
     this.deletedUsers.push(userId);
     this.profiles.delete(userId);
     this.mfaFactors.delete(userId);
+    this.totpAttempts.delete(userId);
     this.views = this.views.filter((v) => v.userId !== userId);
     this.saved = this.saved.filter((s) => s.userId !== userId);
     return Promise.resolve();

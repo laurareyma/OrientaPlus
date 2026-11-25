@@ -12,7 +12,8 @@ export const STEP_UP_TTL_SECONDS = 5 * 60;
 /**
  * Step-up (decisión 0002). Se usa después de requireUser en las acciones
  * críticas. Deja pasar la petición solo si trae un elevated_token válido de
- * esta misma persona en el encabezado X-Elevated-Token. Si no:
+ * esta misma persona, emitido para esta misma acción, en el encabezado
+ * X-Elevated-Token. Si no:
  * - sin 2FA activo → 403 mfa_enrollment_required;
  * - con 2FA activo → crea un reto de un solo uso y responde
  *   403 mfa_required con el stepUpToken que la app debe devolver junto con
@@ -30,7 +31,7 @@ export function requireElevation(
     const elevatedToken = c.req.header("X-Elevated-Token");
     if (
       elevatedToken &&
-      await verifyElevatedToken(secret, elevatedToken, user.id, now)
+      await verifyElevatedToken(secret, elevatedToken, user.id, now, action)
     ) {
       await next();
       return;

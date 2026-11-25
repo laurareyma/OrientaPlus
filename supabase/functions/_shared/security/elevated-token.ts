@@ -5,6 +5,10 @@ import { jwtVerify, SignJWT } from "jose";
  * la persona verificó su segundo factor. Lo exige la API para las acciones
  * críticas (exportar o eliminar datos). Se firma con ELEVATED_TOKEN_SECRET,
  * que solo existe en el servidor.
+ *
+ * El token queda ligado a la acción del reto que se verificó (claim
+ * `action`): un 2FA hecho para exportar datos no autoriza borrar la cuenta.
+ * `action` es un texto opaco aquí; la API define los valores válidos.
  */
 
 export const ELEVATED_TOKEN_TTL_SECONDS = 10 * 60;
@@ -19,10 +23,11 @@ export async function signElevatedToken(
   secret: string,
   userId: string,
   now: Date,
+  action: string,
 ): Promise<{ token: string; expiresAt: string }> {
   const issuedAt = Math.floor(now.getTime() / 1000);
   const expiresAt = issuedAt + ELEVATED_TOKEN_TTL_SECONDS;
-  const token = await new SignJWT({ mfa_verified: true })
+  const token = await new SignJWT({ mfa_verified: true, action })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(userId)
     .setIssuer(ISSUER)
@@ -34,8 +39,8 @@ export async function signElevatedToken(
 }
 
 /**
- * true solo si el token tiene firma válida, no venció, es de este usuario y
- * declara mfa_verified. Cualquier otro caso (incluido un token malformado)
+ * true solo si el token tiene firma válida, no venció, es de este usuario,
+ * declara mfa_verified y fue emitido para esta misma acción. Cualquier otro caso (incluido un token malformado)
  * devuelve false.
  */
 export async function verifyElevatedToken(
@@ -43,6 +48,7 @@ export async function verifyElevatedToken(
   token: string,
   userId: string,
   now: Date,
+  action: string,
 ): Promise<boolean> {
   try {
     const { payload } = await jwtVerify(token, keyFrom(secret), {
@@ -52,7 +58,7 @@ export async function verifyElevatedToken(
       subject: userId,
       currentDate: now,
     });
-    return payload.mfa_verified === true;
+    return payload.mfa_verified === true && payload.action === action;
   } catch {
     return false;
   }

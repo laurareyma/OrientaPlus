@@ -273,3 +273,168 @@ Deno.test("GET /api/me/views sin sesión responde 401", async () => {
 
   assertEquals(res.status, 401);
 });
+
+// --- Límite de intentos de código (hallazgo de la revisión de seguridad) ---
+
+/** Envía `times` códigos incorrectos con el mismo reto. */
+async function failVerify(app: App, stepUpToken: string, times: number) {
+  const statuses: number[] = [];
+  for (let i = 0; i < times; i++) {
+    const res = await post(app, "/api/mfa/verify", {
+      stepUpToken,
+      code: "000000",
+    });
+    statuses.push(res.status);
+  }
+  return statuses;
+}
+
+Deno.test("tras 5 códigos incorrectos, /mfa/verify responde 429 aunque el siguiente código sea correcto", async () => {
+  const { app, clock } = setup();
+  const seed = await enrollTwoFactor(app, clock);
+  clock.advanceSeconds(60);
+  const stepUpToken = await requestStepUp(app);
+
+  assertEquals(await failVerify(app, stepUpToken, 5), [
+    422,
+    422,
+    422,
+    422,
+    422,
+  ]);
+  const blocked = await post(app, "/api/mfa/verify", {
+    stepUpToken,
+    code: await generateTotp(seed, clock.unixSeconds()),
+  });
+
+  assertEquals(blocked.status, 429);
+  const body = await blocked.json();
+  assertEquals(body.error, "too_many_attempts");
+  assertEquals(blocked.headers.get("Retry-After"), String(15 * 60));
+  assertEquals(
+    body.retryAt,
+    new Date(clock.current.getTime() + 15 * 60_000).toISOString(),
+  );
+});
+
+Deno.test("pedir un reto nuevo no reinicia el límite de intentos", async () => {
+  const { app, clock } = setup();
+  const seed = await enrollTwoFactor(app, clock);
+  clock.advanceSeconds(60);
+  await failVerify(app, await requestStepUp(app), 5);
+
+  const res = await post(app, "/api/mfa/verify", {
+    stepUpToken: await requestStepUp(app),
+    code: await generateTotp(seed, clock.unixSeconds()),
+  });
+
+  assertEquals(res.status, 429);
+});
+
+Deno.test("el bloqueo se levanta 15 minutos después del primer intento fallido", async () => {
+  const { app, clock } = setup();
+  const seed = await enrollTwoFactor(app, clock);
+  clock.advanceSeconds(60);
+  await failVerify(app, await requestStepUp(app), 5);
+
+  clock.advanceSeconds(15 * 60);
+  const res = await post(app, "/api/mfa/verify", {
+    stepUpToken: await requestStepUp(app),
+    code: await generateTotp(seed, clock.unixSeconds()),
+  });
+
+  assertEquals(res.status, 200);
+});
+
+Deno.test("un código correcto reinicia el contador de intentos", async () => {
+  const { app, clock } = setup();
+  const seed = await enrollTwoFactor(app, clock);
+  clock.advanceSeconds(60);
+  await failVerify(app, await requestStepUp(app), 4);
+  const ok = await post(app, "/api/mfa/verify", {
+    stepUpToken: await requestStepUp(app),
+    code: await generateTotp(seed, clock.unixSeconds()),
+  });
+  assertEquals(ok.status, 200);
+
+  clock.advanceSeconds(60);
+  const statuses = await failVerify(app, await requestStepUp(app), 5);
+
+  assertEquals(statuses, [422, 422, 422, 422, 422]);
+});
+
+Deno.test("el límite de intentos es por persona", async () => {
+  const { app, clock } = setup();
+  await enrollTwoFactor(app, clock);
+  clock.advanceSeconds(60);
+  await failVerify(app, await requestStepUp(app), 5);
+
+  const other = await post(
+    app,
+    "/api/mfa/enroll",
+    {},
+    { Authorization: `Bearer ${OTHER_USER_TOKEN}` },
+  );
+
+  assertEquals(other.status, 201);
+  // La otra persona no hereda el bloqueo al confirmar su propio factor.
+  const confirm = await post(
+    app,
+    "/api/mfa/enroll/confirm",
+    { code: "000000" },
+    { Authorization: `Bearer ${OTHER_USER_TOKEN}` },
+  );
+  assertEquals(confirm.status, 422);
+});
+
+// --- Token elevado ligado a la acción (hallazgo 2 de la revisión) ---
+
+/** Pide un reto para la acción indicada, lo verifica y devuelve el token. */
+async function elevateFor(
+  app: App,
+  seed: Uint8Array,
+  clock: TestClock,
+  action: "data_export" | "account_deletion",
+): Promise<string> {
+  const denied = action === "data_export"
+    ? await app.request("/api/me/data-export", { headers: AUTH_HEADER })
+    : await app.request("/api/me", { method: "DELETE", headers: AUTH_HEADER });
+  assertEquals(denied.status, 403);
+  const { stepUpToken } = await denied.json();
+  const verify = await post(app, "/api/mfa/verify", {
+    stepUpToken,
+    code: await generateTotp(seed, clock.unixSeconds()),
+  });
+  assertEquals(verify.status, 200);
+  return (await verify.json()).elevatedToken;
+}
+
+Deno.test("el token elevado para exportar no sirve para eliminar la cuenta", async () => {
+  const { app, repository, clock } = setup();
+  const seed = await enrollTwoFactor(app, clock);
+  clock.advanceSeconds(60);
+  const elevatedToken = await elevateFor(app, seed, clock, "data_export");
+
+  const res = await app.request("/api/me", {
+    method: "DELETE",
+    headers: { ...AUTH_HEADER, "X-Elevated-Token": elevatedToken },
+  });
+
+  assertEquals(res.status, 403);
+  assertEquals((await res.json()).error, "mfa_required");
+  assertEquals(repository.deletedUsers, []);
+});
+
+Deno.test("el token elevado para eliminar la cuenta no sirve para exportar", async () => {
+  const { app, clock } = setup();
+  const seed = await enrollTwoFactor(app, clock);
+  clock.advanceSeconds(60);
+  const elevatedToken = await elevateFor(app, seed, clock, "account_deletion");
+
+  const res = await app.request("/api/me/data-export", {
+    headers: { ...AUTH_HEADER, "X-Elevated-Token": elevatedToken },
+  });
+
+  assertEquals(res.status, 403);
+  assertEquals((await res.json()).error, "mfa_required");
+});

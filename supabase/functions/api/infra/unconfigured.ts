@@ -28,6 +28,7 @@ const unconfiguredRepository: Repository = {
   getMfaFactor: fail,
   startMfaEnrollment: fail,
   confirmMfaFactor: fail,
+  registerTotpAttempt: fail,
   consumeTotpStep: fail,
   createStepUpChallenge: fail,
   findActiveStepUpChallenge: fail,

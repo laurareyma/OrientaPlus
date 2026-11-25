@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { z } from "zod";
 import { encodeBase32 } from "../../_shared/security/base32.ts";
 import { signElevatedToken } from "../../_shared/security/elevated-token.ts";
@@ -13,12 +13,23 @@ import {
   generateSecret,
   verifyTotp,
 } from "../../_shared/security/totp.ts";
-import type { AppDependencies, MfaFactor } from "../deps.ts";
+import type { AppDependencies, MfaFactor, TotpAttemptLimit } from "../deps.ts";
 import { errorBody } from "../http/errors.ts";
 import { requireSecret } from "../http/secrets.ts";
 import { type AppEnv, requireUser } from "../middleware/auth.ts";
 
 const ISSUER = "Orienta+";
+
+/**
+ * Límite de intentos de código por persona: 5 cada 15 minutos, contando la
+ * inscripción y el step-up. Sin él, cada intento acierta con probabilidad
+ * 3/10^6 (ventanas C-1, C, C+1) y el 2FA se puede adivinar por fuerza bruta.
+ * Con el límite, un atacante tiene como mucho 15/10^6 por ventana.
+ */
+export const TOTP_ATTEMPT_LIMIT: TotpAttemptLimit = {
+  maxAttempts: 5,
+  windowSeconds: 15 * 60,
+};
 
 const confirmSchema = z.object({ code: z.string() }).strict();
 const verifySchema = z.object({ stepUpToken: z.string(), code: z.string() })
@@ -36,6 +47,13 @@ const STEP_UP_EXPIRED = errorBody(
   "step_up_expired",
   "La verificación venció o ya se usó. Intenta de nuevo la acción.",
 );
+function tooManyAttempts(retryAt: string) {
+  return errorBody(
+    "too_many_attempts",
+    "Hiciste demasiados intentos con códigos incorrectos. Por seguridad, espera hasta 15 minutos y vuelve a intentarlo.",
+    { retryAt },
+  );
+}
 const INVALID_BODY = errorBody(
   "validation_error",
   "Falta el código de verificación.",
@@ -66,6 +84,26 @@ export function mfaRoutes(deps: AppDependencies) {
   }
 
   const unixSeconds = () => Math.floor(deps.now().getTime() / 1000);
+
+  /**
+   * Cuenta el intento antes de verificar el código. Devuelve la respuesta 429
+   * si se superó el límite, o null si se puede seguir.
+   */
+  async function rejectIfTooManyAttempts(c: Context<AppEnv>, userId: string) {
+    const now = deps.now();
+    const attempt = await deps.repository.registerTotpAttempt(
+      userId,
+      now,
+      TOTP_ATTEMPT_LIMIT,
+    );
+    if (attempt.allowed) return null;
+    const waitSeconds = Math.max(
+      1,
+      Math.ceil((Date.parse(attempt.retryAt) - now.getTime()) / 1000),
+    );
+    c.header("Retry-After", String(waitSeconds));
+    return c.json(tooManyAttempts(attempt.retryAt), 429);
+  }
 
   // GET /api/mfa/status
   app.get("/status", async (c) => {
@@ -120,6 +158,9 @@ export function mfaRoutes(deps: AppDependencies) {
       );
     }
 
+    const blocked = await rejectIfTooManyAttempts(c, user.id);
+    if (blocked) return blocked;
+
     const result = await verifyTotp({
       secret: await decryptFactorSecret(factor),
       code: body.data.code,
@@ -159,7 +200,11 @@ export function mfaRoutes(deps: AppDependencies) {
     const factor = await deps.repository.getMfaFactor(user.id);
     if (!factor?.confirmedAt) return c.json(STEP_UP_EXPIRED, 410);
 
-    // 2. Código TOTP (ventanas C-1, C, C+1) con chequeo previo de repetición.
+    // 2. Límite de intentos por persona, antes de mirar el código.
+    const blocked = await rejectIfTooManyAttempts(c, user.id);
+    if (blocked) return blocked;
+
+    // 3. Código TOTP (ventanas C-1, C, C+1) con chequeo previo de repetición.
     const result = await verifyTotp({
       secret: await decryptFactorSecret(factor),
       code: body.data.code,
@@ -172,20 +217,21 @@ export function mfaRoutes(deps: AppDependencies) {
         : c.json(INVALID_CODE, 422);
     }
 
-    // 3. Anti-replay atómico: dos peticiones simultáneas no pasan ambas.
+    // 4. Anti-replay atómico: dos peticiones simultáneas no pasan ambas.
     if (!(await deps.repository.consumeTotpStep(user.id, result.step))) {
       return c.json(REPLAY, 409);
     }
 
-    // 4. El reto se consume una sola vez.
-    if (!(await deps.repository.consumeStepUpChallenge(tokenHash))) {
-      return c.json(STEP_UP_EXPIRED, 410);
-    }
+    // 5. El reto se consume una sola vez.
+    const consumed = await deps.repository.consumeStepUpChallenge(tokenHash);
+    if (!consumed) return c.json(STEP_UP_EXPIRED, 410);
 
+    // 6. El token elevado solo autoriza la acción del reto consumido.
     const { token, expiresAt } = await signElevatedToken(
       requireSecret(deps.secrets, "elevatedTokenSecret"),
       user.id,
       deps.now(),
+      consumed.action,
     );
     return c.json({ elevatedToken: token, expiresAt });
   });
