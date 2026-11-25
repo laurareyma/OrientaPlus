@@ -22,6 +22,7 @@ Cada archivo de esta carpeta registra una decisión técnica o de alcance: conte
 | [0007](0007-curacion-de-oportunidades.md) | Curación y verificación de oportunidades reales, reparto y perfiles de prueba | Ratificada | 2026-11-09 |
 | [0008](0008-flujo-de-trabajo-git.md) | Flujo de trabajo en Git y GitHub | Reemplazada parcialmente por 0009 | 2026-11-09 |
 | [0009](0009-integracion-sin-revision-obligatoria.md) | Integración a `main` sin revisión obligatoria, con verificación previa | Ratificada | 2026-11-09 |
+| [0010](0010-compatibilidad-filtros-e-ia.md) | Compatibilidad, filtros e IA en la curación y el cuestionario (solo fork de Laura) | Propuesta | 2026-11-25 |
 
 ## Responsables y cuentas
 
