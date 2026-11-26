@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   AUTH_HEADER,
+  COMPLETE_PROFILE,
   createTestApp,
   makeOpportunityRecord,
   TEST_USER,
@@ -93,4 +94,119 @@ Deno.test("GET /api/opportunities sin sesión responde 401", async () => {
   const res = await app.request("/api/opportunities");
 
   assertEquals(res.status, 401);
+});
+
+// COMPLETE_PROFILE: 19 años, Chía (25175), bachiller, sin experiencia, flexible.
+const CHIA = "25175";
+const BOGOTA = "11001";
+
+Deno.test("GET /api/opportunities agrega compatibilidad y alcance", async () => {
+  const { app, repository } = createTestApp();
+  repository.profiles.set(TEST_USER.id, COMPLETE_PROFILE);
+  repository.opportunities = [
+    makeOpportunityRecord({ id: "nacional", deadline: "2026-12-01" }),
+    makeOpportunityRecord({
+      id: "local",
+      deadline: "2026-12-02",
+      municipalityCodes: [CHIA],
+    }),
+    makeOpportunityRecord({
+      id: "otra",
+      deadline: "2026-12-03",
+      municipalityCodes: [BOGOTA],
+      minExperience: "1_3y",
+    }),
+  ];
+
+  const body = await (await app.request("/api/opportunities", {
+    headers: AUTH_HEADER,
+  })).json();
+
+  const [nacional, local, otra] = body.items;
+  assertEquals(nacional.fit.percent, 100);
+  assertEquals(nacional.scope, "national");
+  assertEquals(local.fit.unmet, []);
+  assertEquals(local.scope, "local");
+  assertEquals(otra.fit, {
+    met: ["age", "education", "availability"],
+    unmet: ["location", "experience"],
+    percent: 60,
+  });
+  assertEquals(otra.scope, "other_municipality");
+});
+
+Deno.test("con el perfil incompleto, fit es null y la lista responde igual", async () => {
+  const { app, repository } = createTestApp();
+  repository.profiles.set(TEST_USER.id, {
+    ...COMPLETE_PROFILE,
+    educationLevel: null,
+  });
+  repository.opportunities = [
+    makeOpportunityRecord({ municipalityCodes: [CHIA] }),
+  ];
+
+  const res = await app.request("/api/opportunities", { headers: AUTH_HEADER });
+  const [item] = (await res.json()).items;
+
+  assertEquals(res.status, 200);
+  assertEquals(item.fit, null);
+  // El municipio sí está guardado, así que el alcance se puede calcular.
+  assertEquals(item.scope, "local");
+});
+
+Deno.test("sin perfil, fit es null y solo se sabe si es nacional", async () => {
+  const { app, repository } = createTestApp();
+  repository.opportunities = [
+    makeOpportunityRecord({ id: "nacional", deadline: "2026-12-01" }),
+    makeOpportunityRecord({
+      id: "local",
+      deadline: "2026-12-02",
+      municipalityCodes: [CHIA],
+    }),
+  ];
+
+  const body = await (await app.request("/api/opportunities", {
+    headers: AUTH_HEADER,
+  })).json();
+
+  assertEquals(
+    body.items.map((i: { fit: unknown; scope: unknown }) => [i.fit, i.scope]),
+    [[null, "national"], [null, null]],
+  );
+});
+
+Deno.test("GET /api/opportunities/:id agrega compatibilidad y alcance", async () => {
+  const { app, repository } = createTestApp();
+  repository.profiles.set(TEST_USER.id, COMPLETE_PROFILE);
+  const opportunity = makeOpportunityRecord({
+    municipalityCodes: [BOGOTA],
+    minEducation: "university",
+  });
+  repository.opportunities = [opportunity];
+
+  const body = await (await app.request(
+    `/api/opportunities/${opportunity.id}`,
+    { headers: AUTH_HEADER },
+  )).json();
+
+  assertEquals(body.fit, {
+    met: ["age", "experience", "availability"],
+    unmet: ["location", "education"],
+    percent: 60,
+  });
+  assertEquals(body.scope, "other_municipality");
+});
+
+Deno.test("el detalle sin perfil devuelve fit null", async () => {
+  const { app, repository } = createTestApp();
+  const opportunity = makeOpportunityRecord();
+  repository.opportunities = [opportunity];
+
+  const body = await (await app.request(
+    `/api/opportunities/${opportunity.id}`,
+    { headers: AUTH_HEADER },
+  )).json();
+
+  assertEquals(body.fit, null);
+  assertEquals(body.scope, "national");
 });

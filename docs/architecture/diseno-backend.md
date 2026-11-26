@@ -151,9 +151,9 @@ Todas las respuestas de error usan el formato `{ "error": "<codigo>", "message":
 | `GET` | `/me/profile` | `access_token` | Perfil actual y pasos completados (permite retomar). |
 | `PUT` | `/me/profile` | `access_token` | Guarda uno o varios pasos del perfil. Exige consentimiento registrado. Responde `422` con errores por campo. |
 | `GET` | `/recommendations` | `access_token` | Entre 4 y 5 oportunidades vigentes y elegibles para el perfil guardado, cada una con su razón. Responde `409 profile_incomplete` si falta información. |
-| `GET` | `/opportunities` | `access_token` | Todas las oportunidades vigentes (no cerradas), primero las que cierran antes, con su vigencia. Alimenta la pestaña Explorar. |
+| `GET` | `/opportunities` | `access_token` | Todas las oportunidades vigentes (no cerradas), primero las que cierran antes, con su vigencia, `fit` (requisitos cumplidos de 5, o `null` si el perfil está incompleto) y `scope` (`local`, `national` u `other_municipality`), según la decisión 0010. Alimenta la pestaña Explorar. |
 | `GET` | `/me/views` | `access_token` | Oportunidades que la persona ya abrió, la más reciente primero (máximo 30), para retomarlas (compromiso C3). |
-| `GET` | `/opportunities/:id` | `access_token` | Detalle: requisitos, entidad, fuente, vigencia, verificación y enlace oficial. Registra la vista. |
+| `GET` | `/opportunities/:id` | `access_token` | Detalle: requisitos, entidad, fuente, vigencia, verificación, enlace oficial, `fit` y `scope`. Registra la vista. |
 | `GET` | `/me/saved` | `access_token` | Oportunidades guardadas con el ♡, la más reciente primero, con su vigencia (las que ya cerraron aparecen como cerradas). Siguen ahí al cerrar sesión o cambiar de teléfono. |
 | `PUT` | `/me/saved/:id` | `access_token` | Guarda una oportunidad. `204`; guardar de nuevo no cambia la fecha original. `404 not_found` si la oportunidad no existe. |
 | `DELETE` | `/me/saved/:id` | `access_token` | Quita una oportunidad de las guardadas. `204`, también si no estaba. |
